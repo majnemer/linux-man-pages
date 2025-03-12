@@ -1,0 +1,376 @@
+.\" Copyright (C) 2025, David Majnemer <david.majnemer@gmail.com>
+.\"
+.\" SPDX-License-Identifier: Linux-man-pages-copyleft
+.\"
+.TH gate_wait 2 (date) "Linux man-pages (unreleased)"
+.SH NAME
+gate_wait, gate_wake
+\-
+atomic compare\-and\-block
+.SH SYNOPSIS
+.nf
+.BR "#include <linux/gate.h> " " /* Definition of " "GATE_* " "constants */"
+.BR "#include <linux/time.h> " " /* Definition of " \
+"struct __kernel_timespec" " */"
+.BR "#include <linux/types.h>" " /* Definition of " __kernel_clockid_t " */"
+.BR "#include <sys/syscall.h>" " /* Definition of " SYS_* " constants */"
+.P
+.BI "long syscall(SYS_gate_wait, void *" uaddr ", unsigned long " mask ,
+.BI "             unsigned long " expected ", unsigned int " flags ,
+.BI "             const struct __kernel_timespec *_Nullable " ts ,
+.BI "             __kernel_clockid_t " clockid );
+.BI "long syscall(SYS_gate_wake, pid_t " pid ", void *" uaddr ,
+.BI "             unsigned int " flags );
+.P
+.fi
+.P
+.IR Note :
+glibc provides no wrapper for
+.BR gate_wait ()
+or
+.BR gate_wake (),
+necessitating the use of
+.BR syscall (2).
+.SH DESCRIPTION
+.SS gate_wait()
+The
+.BR gate_wait ()
+system call provides an atomic compare\-and\-block primitive which can
+be used to build more general synchronization primitives.
+.P
+The call blocks if
+.RI "(*" uaddr " & " mask ") == " expected
+and will remain blocked until:
+.IP (a) 5
+a matching call to
+.BR gate_wake ()
+is made;
+.IP (b)
+the wait is interrupted by a signal;
+.IP (c)
+a supplied timeout expires; or
+.IP (d)
+a spurious wakeup occurs.
+.P
+The number of bytes loaded by the atomic operation is determined by including
+exactly one of the
+.BI GATE_WAIT_SIZE_U bytes
+values in
+.IR flags .
+.I bytes
+must be a power of two no larger than
+.IR sizeof(long) .
+.SS Timeouts
+A timeout is configured by providing a non-NULL pointer in
+.I ts
+along with a
+.IR clockid .
+The clock must be either
+.BR CLOCK_REALTIME " or " CLOCK_MONOTONIC .
+By default,
+.I ts
+is interpreted as a relative timeout.
+If the
+.B GATE_WAIT_ABSTIME
+flag is set,
+.I ts
+is interpreted as an absolute timeout.
+.SS gate_wake()
+The
+.BR gate_wake ()
+system call resumes the execution of the process specified by
+.I pid
+if that process is blocked in a call to
+.BR gate_wait ()
+on the exact same
+.IR uaddr .
+Currently,
+.I flags
+is unused and should be set to 0.
+.SH RETURN VALUE
+On error (and assuming it was invoked via
+.BR syscall (2)),
+\-1 is returned and
+.I errno
+is set to indicate the error.
+.SS gate_wait()
+Returns 0 when successfully woken up by a call to
+.BR gate_wake ()
+or if it was woken up spuriously.
+.SS gate_wake()
+Returns 1 if it definitively woke up the process.
+Returns 0 if the process was probably not blocked in any call to
+.BR gate_wait ().
+.SH ERRORS
+.SS gate_wait()
+.TP
+.B EAGAIN
+.RI "(*" uaddr " & " mask ") != " expected .
+.TP
+.B EFAULT
+.I uaddr
+referenced invalid memory.
+.TP
+.B EINTR
+A signal occurred while blocked.
+.TP
+.B EINVAL
+.I uaddr
+was insufficiently aligned.
+.TP
+.B EINVAL
+.I flags
+was invalid.
+.TP
+.B EINVAL
+.I ts.tv_sec
+is negative or if
+.I ts.tv_nsec
+is outside the range [0, 999,999,999].
+.TP
+.B EINVAL
+.I clockid
+did not refer to neither
+.BR CLOCK_REALTIME " nor " CLOCK_MONOTONIC .
+.TP
+.B ETIMEDOUT
+.I ts
+expired while blocked.
+.SS gate_wake()
+.TP
+.B EAGAIN
+.I pid
+was blocked in
+.BR gate_wait ()
+but
+.I uaddr
+did not match.
+.TP
+.B EINVAL
+.I flags
+was invalid.
+.TP
+.B EPERM
+.I pid
+was not in the same thread group as the caller.
+.TP
+.B ESRCH
+.I pid
+did not identify an existing process.
+.SH VERSIONS
+This system call first appeared in Linux 6.14.
+.SH CONFORMING TO
+This system call is Linux-specific.
+.SH NOTES
+Unlike
+.BR futex (2),
+.BR gate_wait ()
+and
+.BR gate_wake ()
+offer a more restricted interface that trades off certain features for
+performance.
+.P
+Both sides of the synchronization (i.e. the processes using
+.BR gate_wait ()
+and
+.BR gate_wake ())
+must belong to the same thread group.
+.SS Memory barriers
+The
+.BR gate_wait ()
+call performs an
+.IR smp_mb ()
+before dereferencing
+.IR uaddr ;
+no barrier is enforced after the load.
+.P
+The
+.BR gate_wake ()
+call performs an
+.IR smp_mb ()
+before checking for a waiting process to wake;
+no barrier is enforced after the load.
+.SH EXAMPLES
+The program below demonstrates the use of gates in a scenario where a parent
+process and a child process synchronize access to the terminal using a pair of
+gates located in memory.
+Both processes write
+.I nloops
+messages to the terminal and alternate their outputs using a
+synchronization protocol.
+The following output may be observed upon running the program:
+.P
+.in +4n
+.EX
+$ \fB./gate_demo\fP
+Parent (18534) 0
+Child  (18535) 0
+Parent (18534) 1
+Child  (18535) 1
+Parent (18534) 2
+Child  (18535) 2
+Parent (18534) 3
+Child  (18535) 3
+Parent (18534) 4
+Child  (18535) 4
+.EE
+.in
+.SS Program source
+\&
+.\" SRC BEGIN (gate_demo.c)
+.EX
+/* gate_demo.c
+\&
+   Usage: gate_demo [nloops=5]
+\&
+   Demonstrate the use of gates in a program where parent and child
+   synchronize access to a shared resource (the terminal) using a pair
+   of gates. Each thread writes \[aq]nloops\[aq] messages to the
+   terminal, alternating their outputs.
+*/
+#define _GNU_SOURCE
+#include <err.h>         /* for err() */
+#include <errno.h>       /* for E* , errno */
+#include <linux/gate.h>  /* for GATE_* */
+#include <sched.h>       /* for CLONE_* */
+#include <stdatomic.h>   /* for atomic_*() */
+#include <stdint.h>      /* for uint8_t */
+#include <stdio.h>       /* for printf() */
+#include <stdlib.h>      /* for strtol(), exit(), EXIT_* */
+#include <sys/mman.h>    /* for mmap(), MAP_* */
+#include <sys/syscall.h> /* for __NR_gate_* */
+#include <time.h>        /* for CLOCK_* */
+#include <unistd.h>      /* for syscall(), gettid() */
+\&
+#define STACK_SIZE (1024 * 1024)
+\&
+static _Atomic uint8_t child_gate = 0;  /* State: unavailable */
+static _Atomic uint8_t parent_gate = 1; /* State: available */
+\&
+static long            nloops = 5;
+\&
+static pid_t           parent_tid;
+\&
+/* Acquire the gate pointed to by \[aq]gatep\[aq]:
+   wait until its value becomes 1, then atomically set it to 0. */
+\&
+static void
+gate_wait(_Atomic uint8_t *gatep)
+{
+    long     s;
+    uint8_t desired = 0;
+    uint8_t expected;
+\&
+    /* atomic_compare_exchange_strong(ptr, expected, desired)
+       atomically performs the equivalent of:
+\&
+           old = *ptr;
+           if (old == *expected) {
+               *ptr = desired;
+               return true;
+           } else {
+               *expected = old;
+               return false;
+           }
+\&
+       It returns true if the operation succeeded. */
+\&
+    while (1) {
+        /* Check if the gate is available. */
+        expected = 1;
+        if (atomic_compare_exchange_strong(gatep, &expected, desired))
+            break; /* Gate acquired */
+\&
+        /* Gate is not available; wait. */
+\&
+        s = syscall(__NR_gate_wait, gatep, (unsigned long) -1, expected,
+                    0, NULL, CLOCK_REALTIME);
+        if (s == -1 && errno != EAGAIN)
+            err(EXIT_FAILURE, "gate_wait");
+    }
+}
+\&
+/* Release the gate pointed to by \[aq]gatep\[aq]:
+   if the gate value is 0, set it to 1 and wake \[aq]pid\[aq]. */
+\&
+static void
+gate_post(pid_t pid, _Atomic uint8_t *gatep)
+{
+    long    s;
+    uint8_t desired = 1;
+    uint8_t expected = 0;
+\&
+    /* atomic_compare_exchange_strong() was described
+       in comments above. */
+\&
+    if (atomic_compare_exchange_strong(gatep, &expected, desired)) {
+        s = syscall(__NR_gate_wake, pid, gatep, 0);
+        if (s == -1 && errno != EAGAIN)
+            err(EXIT_FAILURE, "gate_wake");
+    }
+}
+\&
+static int
+child_thread_fn(void *unused)
+{
+    pid_t  child_tid;
+\&
+    child_tid = gettid();
+    for (long j = 0; j < nloops; j++) {
+        gate_wait(&child_gate);
+        printf("Child  (%jd) %ld\[rs]n", (intmax_t) child_tid, j);
+        gate_post(parent_tid, &parent_gate);
+    }
+\&
+    return 0;
+}
+\&
+int
+main(int argc, char *argv[])
+{
+    void  *stack;
+    pid_t  child_tid;
+\&
+    if (argc > 1) {
+        nloops = strtol(argv[1], NULL, 10);
+        if (errno)
+            err(EXIT_FAILURE, "nloops");
+    }
+\&
+    parent_tid = gettid();
+\&
+    /* Allocate stack for the child thread. */
+\&
+    stack = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, \-1, 0);
+    if (stack == MAP_FAILED)
+        err(EXIT_FAILURE, "mmap stack");
+\&
+    /* Create a child thread. */
+\&
+    child_tid =
+        clone(child_thread_fn, (char *) stack + STACK_SIZE,
+              CLONE_VM | CLONE_SIGHAND | CLONE_THREAD,
+              NULL);
+    if (child_tid == -1)
+        err(EXIT_FAILURE, "clone");
+\&
+    /* Parent continues execution. */
+\&
+    for (long j = 0; j < nloops; j++) {
+        gate_wait(&parent_gate);
+        printf("Parent (%jd) %ld\[rs]n", (intmax_t) parent_tid, j);
+        gate_post(child_tid, &child_gate);
+    }
+\&
+    gate_wait(&parent_gate);
+\&
+    exit(EXIT_SUCCESS);
+}
+.EE
+.\" SRC END
+.SH SEE ALSO
+.BR futex (2)
+.P
+.I Documentation/memory\-barriers.txt
+in the Linux kernel source tree
