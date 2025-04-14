@@ -4,23 +4,29 @@
 .\"
 .TH gate_wait 2 (date) "Linux man-pages (unreleased)"
 .SH NAME
-gate_wait, gate_wake
+gate_wait,
+gate_wake
 \-
-atomic compare\-and\-block
+atomic compare-and-block
+.SH LIBRARY
+Standard C library
+.RI ( libc ,\~ \-lc )
 .SH SYNOPSIS
 .nf
 .BR "#include <linux/gate.h> " " /* Definition of " "GATE_* " "constants */"
 .BR "#include <linux/time.h> " " /* Definition of " \
 "struct __kernel_timespec" " */"
-.BR "#include <linux/types.h>" " /* Definition of " __kernel_clockid_t " */"
+.BR "#include <linux/types.h>" " /* Definition of " __kernel_* " */"
 .BR "#include <sys/syscall.h>" " /* Definition of " SYS_* " constants */"
+.B #include <unistd.h>
 .P
-.BI "long syscall(SYS_gate_wait, void *" uaddr ", unsigned long " mask ,
-.BI "             unsigned long " expected ", unsigned int " flags ,
-.BI "             const struct __kernel_timespec *_Nullable " ts ,
-.BI "             __kernel_clockid_t " clockid );
+.BI "long syscall(SYS_gate_wait, void *" uaddr ", __kernel_ulong_t " mask ,
+.BI "             __kernel_ulong_t " expected ", size_t " usize ,
+.BI "             const struct gate_wait_options *_Nullable " options ,
+.BI "             size_t " options_size );
 .BI "long syscall(SYS_gate_wake, pid_t " pid ", void *" uaddr ,
-.BI "             unsigned int " flags );
+.BI "             const struct gate_wake_options *_Nullable " options ,
+.BI "             size_t " options_size );
 .P
 .fi
 .P
@@ -35,7 +41,7 @@ necessitating the use of
 .SS gate_wait()
 The
 .BR gate_wait ()
-system call provides an atomic compare\-and\-block primitive which can
+system call provides an atomic compare-and-block primitive which can
 be used to build more general synchronization primitives.
 .P
 The call blocks if
@@ -52,29 +58,76 @@ a supplied timeout expires; or
 .IP (d)
 a spurious wakeup occurs.
 .P
-The number of bytes loaded by the atomic operation is determined by including
-exactly one of the
-.BI GATE_WAIT_SIZE_U bytes
-values in
-.IR flags .
-.I bytes
+The number of bytes loaded by the atomic operation is determined by
+.IR usize .
+.I usize
 must be a power of two no larger than
-.IR sizeof(long) .
-.SS Timeouts
-A timeout is configured by providing a non-NULL pointer in
-.I ts
-along with a
-.IR clockid .
+.IR sizeof(__kernel_ulong_t) .
+.P
+.I options
+is a pointer to a structure of the following form:
+.P
+.in +4n
+.EX
+struct gate_wait_options {
+	__u64                     flags;
+	struct __kernel_timespec  timeout;
+	__s32                     clockid;
+	__u32                     reserved0;
+} __attribute__((__aligned__(8)));
+.EE
+.in
+.P
+.I options_size
+should be set to
+.IR "sizeof(struct gate_wait_options)" .
+.P
+Fields added to
+.I gate_wait_options
+will retain the prior behavior when those fields are zero-filled.
+.P
+.I options_size
+smaller than
+.I "sizeof(struct gate_wait_options)"
+results in the bytes beyond
+.I options_size
+to behave as-if they were present in
+.I options
+and zero-filled.
+.P
+.I options_size
+larger than
+.I "sizeof(struct gate_wait_options)"
+is permitted so long as the additional bytes are zero-filled.
+.P
+The fields of the
+.I gate_wait_options
+structure are as follows:
+.TP
+.I flags
+contains zero or more of the following constants:
+.RS
+.TP
+.B GATE_WAIT_ABSTIME
+.I timeout
+is an absolute timeout.
+.TP
+.B GATE_WAIT_RELTIME
+.I timeout
+is a relative timeout.
+.RE
+.TP
+.I timeout
+specifies the interval the wait will block.
+.TP
+.I clockid
+specifies which clock will be used to determine when
+.I timeout
+has expired.
 The clock must be either
 .BR CLOCK_REALTIME " or " CLOCK_MONOTONIC .
-By default,
-.I ts
-is interpreted as a relative timeout.
-If the
-.B GATE_WAIT_ABSTIME
-flag is set,
-.I ts
-is interpreted as an absolute timeout.
+.IP
+.P
 .SS gate_wake()
 The
 .BR gate_wake ()
@@ -84,9 +137,51 @@ if that process is blocked in a call to
 .BR gate_wait ()
 on the exact same
 .IR uaddr .
-Currently,
-.I flags
-is unused and should be set to 0.
+.P
+.I options
+is a pointer to a structure of the following form:
+.P
+.in +4n
+.EX
+struct gate_wake_options {
+	__u64                     flags;
+} __attribute__((__aligned__(8)));
+.EE
+.in
+.P
+.I options_size
+should be set to
+.I "sizeof(struct gate_wake_options)"
+when
+.I options
+is non-NULL.
+.P
+Fields added to
+.I gate_wake_options
+will retain the prior behavior when those fields are zero-filled.
+.P
+.I options_size
+smaller than
+.I "sizeof(struct gate_wake_options)"
+results in the bytes beyond
+.I options_size
+to behave as-if they were present in
+.I options
+and zero-filled.
+.P
+.I options_size
+larger than
+.I "sizeof(struct gate_wake_options)"
+is permitted so long as the additional bytes are zero-filled.
+.P
+The fields of the
+.I gate_wake_options
+structure are as follows:
+.TP
+.B flags
+unused and should be set to 0.
+.IP
+.P
 .SH RETURN VALUE
 On error (and assuming it was invoked via
 .BR syscall (2)),
@@ -104,11 +199,24 @@ Returns 0 if the process was probably not blocked in any call to
 .SH ERRORS
 .SS gate_wait()
 .TP
+.B E2BIG
+.I options_size
+exceeds a page of memory.
+.TP
+.B E2BIG
+.I options_size
+implies that there are fields it does not understand which are set to non-zero
+values.
+.TP
 .B EAGAIN
 .RI "(*" uaddr " & " mask ") != " expected .
 .TP
 .B EFAULT
 .I uaddr
+referenced invalid memory.
+.TP
+.B EFAULT
+.I options
 referenced invalid memory.
 .TP
 .B EINTR
@@ -119,24 +227,33 @@ A signal occurred while blocked.
 was insufficiently aligned.
 .TP
 .B EINVAL
-.I flags
+.I options.flags
 was invalid.
 .TP
 .B EINVAL
-.I ts.tv_sec
+.I options.timeout.tv_sec
 is negative or if
-.I ts.tv_nsec
+.I options.timeout.tv_nsec
 is outside the range [0, 999,999,999].
 .TP
 .B EINVAL
-.I clockid
+.I options.clockid
 did not refer to neither
 .BR CLOCK_REALTIME " nor " CLOCK_MONOTONIC .
 .TP
 .B ETIMEDOUT
-.I ts
+.I options.timeout
 expired while blocked.
 .SS gate_wake()
+.TP
+.B E2BIG
+.I options_size
+exceeds a page of memory.
+.TP
+.B E2BIG
+.I options_size
+implies that there are fields it does not understand which are set to non-zero
+values.
 .TP
 .B EAGAIN
 .I pid
@@ -146,8 +263,12 @@ but
 .I uaddr
 did not match.
 .TP
+.B EFAULT
+.I options
+referenced invalid memory.
+.TP
 .B EINVAL
-.I flags
+.I options.flags
 was invalid.
 .TP
 .B EPERM
@@ -158,8 +279,8 @@ was not in the same thread group as the caller.
 .I pid
 did not identify an existing process.
 .SH VERSIONS
-This system call first appeared in Linux 6.14.
-.SH CONFORMING TO
+These system call first appeared in Linux 6.14.
+.SH STANDARDS
 This system call is Linux-specific.
 .SH NOTES
 Unlike
@@ -219,6 +340,7 @@ Child  (18535) 4
 \&
 .\" SRC BEGIN (gate_demo.c)
 .EX
+/* NOLINTBEGIN(clang-diagnostic-pre-c11-compat) */
 /* gate_demo.c
 \&
    Usage: gate_demo [nloops=5]
@@ -242,12 +364,13 @@ Child  (18535) 4
 #include <time.h>        /* for CLOCK_* */
 #include <unistd.h>      /* for syscall(), gettid() */
 \&
+#define DEFAULT_NLOOPS 5
 #define STACK_SIZE (1024 * 1024)
 \&
 static _Atomic uint8_t child_gate = 0;  /* State: unavailable */
 static _Atomic uint8_t parent_gate = 1; /* State: available */
 \&
-static long            nloops = 5;
+static long            nloops;
 \&
 static pid_t           parent_tid;
 \&
@@ -283,8 +406,10 @@ gate_wait(_Atomic uint8_t *gatep)
 \&
         /* Gate is not available; wait. */
 \&
-        s = syscall(__NR_gate_wait, gatep, (unsigned long) -1, expected,
-                    0, NULL, CLOCK_REALTIME);
+        s = syscall(__NR_gate_wait, gatep, (__kernel_ulong_t) -1,
+                    (__kernel_ulong_t) expected, sizeof(*gatep),
+                    (const struct gate_wake_options *) NULL,
+                    (size_t) 0);
         if (s == -1 && errno != EAGAIN)
             err(EXIT_FAILURE, "gate_wait");
     }
@@ -304,7 +429,9 @@ gate_post(pid_t pid, _Atomic uint8_t *gatep)
        in comments above. */
 \&
     if (atomic_compare_exchange_strong(gatep, &expected, desired)) {
-        s = syscall(__NR_gate_wake, pid, gatep, 0);
+        s = syscall(__NR_gate_wake, pid, gatep,
+                    (const struct gate_wake_options *) NULL,
+                    (size_t) 0);
         if (s == -1 && errno != EAGAIN)
             err(EXIT_FAILURE, "gate_wake");
     }
@@ -315,6 +442,7 @@ child_thread_fn(void *unused)
 {
     pid_t  child_tid;
 \&
+    (void) unused;
     child_tid = gettid();
     for (long j = 0; j < nloops; j++) {
         gate_wait(&child_gate);
@@ -332,9 +460,11 @@ main(int argc, char *argv[])
     pid_t  child_tid;
 \&
     if (argc > 1) {
-        nloops = strtol(argv[1], NULL, 10);
+        nloops = strtol(argv[1], NULL, 0);
         if (errno)
             err(EXIT_FAILURE, "nloops");
+    } else {
+        nloops = DEFAULT_NLOOPS;
     }
 \&
     parent_tid = gettid();
@@ -367,6 +497,7 @@ main(int argc, char *argv[])
 \&
     exit(EXIT_SUCCESS);
 }
+/* NOLINTEND(clang-diagnostic-pre-c11-compat) */
 .EE
 .\" SRC END
 .SH SEE ALSO
