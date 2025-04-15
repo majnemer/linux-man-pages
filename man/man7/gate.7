@@ -10,43 +10,57 @@ gate \- overview of the gate user-space synchronization mechanism
 .B #include <linux/gate.h>
 .fi
 .SH DESCRIPTION
-The Linux kernel provides the gate mechanism as a building block
-for simple, potentially fast user-space synchronization between threads
+The Linux kernel provides the gate mechanism
+as a building block
+for simple, potentially fast user-space synchronization
+between threads
 belonging to the same process (thread group).
+.P
 It consists of two system calls,
 .BR gate_wait (2)
 and
 .BR gate_wake (2),
-which allow a thread to atomically check a condition in memory and,
-if the condition holds, wait efficiently until woken by another thread.
+which allow a thread
+to atomically check a condition in memory and,
+if the condition holds,
+wait efficiently until woken by another thread.
 .P
 Gates offer a restricted interface compared to
 .BR futex (2),
-omitting features like priority inheritance and
-complex requeueing operations.
-This simpler design may offer performance advantages in certain scenarios.
-However, gates are strictly limited to synchronization
+omitting features like priority inheritance
+and complex requeueing operations.
+This simpler design may offer performance advantages
+in certain scenarios.
+However,
+gates are strictly limited to synchronization
 .I within
-a single thread group (process), unlike futexes which can synchronize
-unrelated processes using shared memory.
+a single thread group (process),
+unlike futexes
+which can synchronize unrelated processes using shared memory.
 .P
 The core idea is similar to the "slow path" concept used with futexes.
 Applications typically attempt fast user-space atomic operations
-(like compare-and-swap) first. Only when contention is detected or
-a specific condition needs to be awaited does the application invoke
+(like compare-and-exchange) first.
+Only when contention is detected
+or a specific condition needs to be awaited
+does the application invoke
 .BR gate_wait (2)
 to interact with the kernel and block the thread.
-Another thread, after changing the relevant state, uses
+Another thread,
+after changing the relevant state,
+uses
 .BR gate_wake (2)
 to wake the specific waiting thread.
 .P
-A gate operates on a user-space memory location specified by an address
-.RI ( uaddr ).
+A gate operates on a user-space memory location specified by
+.IR uaddr .
 The
 .BR gate_wait (2)
-call checks if the value at
+call checks if the (potentially masked) value at
 .I uaddr
-(potentially masked) matches an expected value; if so, it may block.
+matches an expected value;
+if so,
+it blocks.
 The
 .BR gate_wake (2)
 call attempts to wake a specific thread (identified by
@@ -56,137 +70,115 @@ if that thread is currently blocked in
 on the exact same
 .IR uaddr .
 .P
-Most programmers will likely use gates indirectly through higher-level
-synchronization constructs provided by threading libraries or custom
-synchronization primitives built upon this mechanism.
-Direct use requires careful understanding of
-memory ordering and race conditions (see NOTES and CAVEATS).
+Most programmers will likely use gates indirectly
+through higher-level synchronization constructs
+provided by threading libraries
+or custom synchronization primitives built upon this mechanism.
+Direct use requires careful understanding
+of memory ordering and race conditions (see NOTES and CAVEATS).
 .P
-For the precise operational details, argument descriptions, return values,
-and error codes of the system calls, see
+For the precise operational details,
+argument descriptions,
+return values,
+and error codes of the system calls,
+see
 .BR gate_wait (2).
 .SH VERSIONS
-The gate mechanism and associated system calls first appeared in Linux 6.14.
+The gate mechanism and associated system calls
+first appeared in Linux 6.14.
 .SH NOTES
 .SS Memory ordering
-The kernel guarantees specific memory ordering semantics for the
+The kernel guarantees specific memory ordering semantics
+for the
 .BR gate_wait (2)
 and
 .BR gate_wake (2)
-system calls, which are crucial for correct synchronization between
-threads. These guarantees act like full memory barriers (conceptually
-similar to
+system calls,
+which are crucial for correct synchronization between threads.
+These guarantees act like full memory barriers
+(conceptually similar to
 .BR smp_mb ()
-in the kernel), ensuring memory operations
-are observed in the correct order across CPUs.
+in the kernel),
+ensuring memory operations are observed in the correct order
+across CPUs.
 .TP
 .BR gate_wait (2):
 Performs a full memory barrier
-.B before
-it atomically reads the value at
+between registering an intent to wait in the kernel
+and atomically reading the value at
 .I uaddr
 to check the wait condition.
-This ensures that memory operations performed by the waiting thread
-before calling
-.BR gate_wait (2)
-are ordered before this atomic read.
-However, no specific memory barrier is implied by the kernel
+However,
+no specific memory barrier is implied by the kernel
 .I after
-the read or
+the read
+or
 .I after
-the thread wakes up (whether normally or
-spuriously).
+the thread wakes up (whether normally or spuriously).
 .TP
 .BR gate_wake (2):
 Performs a full memory barrier
-.B before
-it checks the state of the target thread
+before attempting to unregister the wait intent
+of the target thread
 .I pid
-and potentially initiates the wakeup mechanism.
-This ensures that a concurrent call to
-.BR gate_wait (2)
-on another thread
-memory operations performed by the waking thread
-.I before
-the
-.BR gate_wake (2)
-call are made visible before the target thread could potentially observe
-the effects of being woken.
-However, no specific memory barrier is implied by the kernel
+and potentially waking that thread if it is sleeping.
+However,
+no specific memory barrier is implied by the kernel
 .I after
-it checks the target's state or
+it checks the target's state
+or
 .I after
 it initiates the wakeup.
 .P
-Programmers must ensure correct overall memory ordering for their
-algorithm by potentially inserting appropriate user-space memory
-barriers (which may be compiler intrinsics or specific hardware fence
-instructions). For instance:
-.IP \[bu] 3
-A thread returning from
+This ensures that
+when concurrent
 .BR gate_wait (2)
-might need an acquire
-barrier (or full barrier) before accessing data protected by the
-synchronization condition, to ensure it sees writes performed by the
-thread that caused the wakeup.
-.IP \[bu]
-A thread calling
+and
 .BR gate_wake (2)
-typically needs a release barrier
-(or full barrier)
-.I after
-its state-changing memory write but
-.I before
-calling
+calls are executing,
+the call to
+.BR gate_wait (2)
+will either see the updated value at
+.I uaddr
+or it will see the notification from
 .BR gate_wake (2).
-This ensures the write is
-globally visible before any woken thread could potentially run.
-This complements the barrier performed
-.I inside
-the
-.BR gate_wake (2)
-call itself. See also the "Write-then-wake pattern" note.
-.P
-Consult the Linux kernel source documentation (for example,
-.IR Documentation/memory-barriers.txt )
-and processor architecture manuals for
-comprehensive details on memory barriers and
-ordering semantics.
 .SS Write-then-wake pattern
-Typically, a thread calls
+Typically,
+a thread calls
 .BR gate_wake (2)
 only
 .B after
-performing the state change (usually a memory write, often to
+performing the state change
+(usually a memory write,
+often to
 .I uaddr
-itself or related data) that the waiting thread is interested in.
-For example, writing an "unlocked" state to a lock variable before
-calling
+itself or related data)
+that the waiting thread is interested in.
+For example,
+writing an "unlocked" state to a lock variable
+before calling
 .BR gate_wake (2)
 on a thread waiting to acquire it.
-The memory ordering guarantees provided by the system calls and
-potentially additional memory barriers (discussed above) are
-crucial to ensure the waiting thread can observe the state change after
-being woken.
 Without a preceding state change,
-waking a thread may simply cause it to
-re-check the (still unmet) condition and
-immediately wait again via
+waking a thread may simply cause it
+to re-check the (still unmet) condition
+and immediately wait again via
 .BR gate_wait (2).
 .SH CAVEATS
 .SS Typical usage: Atomic operation followed by wait loop
 A primary use case for
 .BR gate_wait (2)
-is in the "slow path" of
-user-space synchronization algorithms after a fast-path atomic
-operation fails.
-For example, trying to acquire a lock using an
-atomic compare-and-exchange operation:
+is in the "slow path"
+of user-space synchronization algorithms
+after a fast-path atomic operation fails.
+For example,
+trying to acquire a lock using an atomic compare-and-exchange operation:
 .IP (1) 5
 Atomically attempt to change the state.
 .IP (2)
-If the atomic operation succeeds, the critical
-section is entered or the update is done; proceed.
+If the atomic operation succeeds,
+the critical section is entered or the update is done;
+proceed.
 .IP (3)
 If the atomic operation fails,
 then use
@@ -197,43 +189,46 @@ change.
 .IP (4)
 Upon return from
 .BR gate_wait (2),
-regardless of it being a successful result or
-an error result
+regardless of it being a successful result
+or an error result
 .RB ( EAGAIN ,
 .BR ETIMEDOUT ,
 .BR EINTR ,
 etc.),
 the application must typically loop back to step (1).
-Looping back to retry the atomic operation is
-generally necessary because:
+Looping back to retry the atomic operation
+is generally necessary because:
 .RS 5
 .IP \[bu] 3
 The memory state at
 .I uaddr
-could have changed between the
-kernel's action (wakeup, check, timeout) and the
-return to user space due to race conditions.
+could have changed
+between the kernel's action (wakeup, check, timeout)
+and the return to user space
+due to race conditions.
 .IP \[bu]
 Wakeups (a return value of 0) can be spurious.
 .IP \[bu]
-The timeout expiration may be racing with the memory state at
+The timeout expiration may be racing
+with the memory state at
 .I uaddr
 changing.
 .RE
 .P
-Consequently, retrying the primary atomic operation is often the
-only reliable way to determine if the desired state transition
-can now proceed.
+Consequently,
+retrying the primary atomic operation
+is often the only reliable way
+to determine if the desired state transition can now proceed.
 .P
 One way to do this for the above example is as follows:
 .P
 .in +4n
 .EX
 enum mtx_state { UNLOCKED, LOCKED };
-void mutex_timedlock(enum mtx_state* lock)
+void mtx_lock(enum mtx_state* lock)
 {
-    long            err = 0;
-    enum mtx_state  expected = UNLOCKED;
+    long           err = 0;
+    enum mtx_state expected = UNLOCKED;
 \&
     while (true) {
         /* Step (1). */
@@ -253,30 +248,35 @@ void mutex_timedlock(enum mtx_state* lock)
 .EE
 .in
 .P
-This loop structure, centered around retrying the primary atomic
-operation after waiting, is necessary to correctly handle race
-conditions, spurious wakeups, and state changes that might occur
-concurrently when using
+This loop structure,
+centered around retrying the primary atomic operation after waiting,
+is necessary to correctly handle race conditions,
+spurious wakeups,
+and state changes
+that might occur concurrently when using
 .BR gate_wait (2).
 .SS Spurious Wakeups and Address Reuse Hazards
 Applications must be prepared for
 .BR gate_wait (2)
-to return 0
-unexpectedly.
+to return 0 unexpectedly.
 This can happen in two main ways:
 .IP (1) 5
 .BR "Spurious Wakeups" :
-The kernel may wake the thread
-spuriously, without a corresponding
+The kernel may wake the thread spuriously,
+without a corresponding
 .BR gate_wake (2)
-call, signal, or timeout event.
-This is a standard behavior permitted for many blocking primitives.
+call,
+signal,
+or timeout event.
+This is a common behavior permitted
+for many blocking primitives.
 .IP (2)
 .BR "Address Reuse Races" :
-The actions typically performed by a
-waking thread before calling
+The actions typically performed by a waking thread
+before calling
 .BR gate_wake (2)
-(like writing to memory) are not atomic with the
+(like writing to memory)
+are not atomic with the
 .BR gate_wake (2)
 call itself.
 This time window allows other threads to potentially run,
@@ -284,46 +284,54 @@ deallocate the memory at
 .IR uaddr ,
 and reallocate that same address
 for a completely different purpose.
-If this happens, a subsequent
+If this happens,
+a subsequent
 .BR gate_wake (2)
 targeting the original waiter's
 .I pid
-might still wake that thread, because the wake
-mechanism primarily checks if the passed address
+might still wake that thread,
+because the wake mechanism primarily checks
+if the passed address
 .I uaddr
-matches the one stored when the wait began, without necessarily
-validating the current semantic context of that memory.
-From the original thread's perspective, this is an unexpected
-wakeup caused by the race condition.
+matches the one stored when the wait began,
+without necessarily validating the current semantic context
+of that memory.
+From the original thread's perspective,
+this is an unexpected wakeup caused by the race condition.
 .P
-Because wakeups can be spurious or arise from race conditions
-involving address reuse, the application
-.B must always
-re-validate the specific condition it is waiting for after
+Because wakeups can be spurious
+or arise from race conditions involving address reuse,
+the application must always re-validate
+the specific condition it is waiting for
+after
 .BR gate_wait (2)
 returns 0,
-typically by retrying its primary atomic operation or re-reading
-relevant state within its
-synchronization loop (see "Typical usage" above).
+typically by retrying its primary atomic operation
+or re-reading relevant state
+within its synchronization loop (see "Typical usage" above).
 .SS Interpreting gate_wake() errors in concurrent contexts
-In complex concurrent programs, certain errors returned by
+In complex concurrent programs,
+certain errors returned by
 .BR gate_wake (2)
-might result from intricate race conditions rather
-than straightforward programming errors in the calling thread:
+might result from intricate race conditions
+rather than straightforward programming errors
+in the calling thread:
 .TP
 .B EAGAIN
-This indicates the target thread was found waiting, but
-on a different address than
+This indicates the target thread was found waiting,
+but on a different address than
 .IR uaddr .
-While this could be due
-to the caller specifying the wrong address, it might also occur
-if the target thread was previously waiting on
+While this could be due to the caller
+specifying the wrong address,
+it might also occur if the target thread was previously waiting on
 .IR uaddr ,
-was woken up (perhaps by an action related to the current caller's
-preceding writes), made progress, and subsequently blocked
-again on a
+was woken up (perhaps by an action related to
+the current caller's preceding writes),
+made progress,
+and subsequently blocked again on a
 .I different
-address before the
+address
+before the
 .BR gate_wake (2)
 call was processed.
 .TP
@@ -334,19 +342,19 @@ this error can also arise from race conditions
 involving memory deallocation.
 If
 .I uaddr
-points into dynamically
-managed memory (for example, a reference-counted object), actions
-preceding the
+points into dynamically managed memory
+(for example, a reference-counted object),
+actions preceding the
 .BR gate_wake (2)
-call might allow another thread to
-free and unmap this memory before
+call
+might allow another thread to free and unmap this memory
+before
 .BR gate_wake (2)
 executes.
 In such cases,
 .B EFAULT
-might be a benign consequence of the memory
-lifecycle race, not necessarily a bug in the caller's pointer
-handling.
+might be a benign consequence of the memory lifecycle race,
+not necessarily a bug in the caller's pointer handling.
 .TP
 .B ESRCH
 This means no thread with the specified
@@ -354,9 +362,11 @@ This means no thread with the specified
 was found.
 While this can indicate the caller used an invalid or stale
 .IR pid ,
-it could also occur due to a race where the target
-thread existed, was woken (perhaps by the caller's related
-actions), completed its work, and
+it could also occur due to a race
+where the target thread existed,
+was woken (perhaps by the caller's related actions),
+completed its work,
+and
 .B exited
 before the
 .BR gate_wake (2)
@@ -365,25 +375,24 @@ system call executed.
 .B EPERM
 This indicates the caller and target thread
 .I pid
-belong
-to different thread groups.
-This check normally prevents
-waking threads in other processes.
-However, it could also
-arise from a race condition involving PID reuse: if the intended
-target thread (in the caller's thread group) exits, its PID
-might be rapidly reused by the kernel for a new thread in a
+belong to different thread groups.
+This check normally prevents waking threads in other processes.
+However,
+it could also arise from a race condition involving PID reuse:
+if the intended target thread (in the caller's thread group) exits,
+its PID might be reused by the kernel
+for a new thread in a
 .I different
 thread group.
 If
 .BR gate_wake (2)
-executes after this
-PID reuse, it will correctly find a thread with the numeric
+executes after this PID reuse,
+it will correctly find a thread with the numeric
 .I pid
 but return
 .B EPERM
-because the (new) target thread is
-no longer in the caller's thread group.
+because the (new) target thread is no longer
+in the caller's thread group.
 .SH SEE ALSO
 .BR futex (2),
 .BR futex (7),
