@@ -13,304 +13,375 @@ Standard C library
 .RI ( libc ,\~ \-lc )
 .SH SYNOPSIS
 .nf
-.BR "#include <linux/gate.h> " " /* Definition of " "GATE_* " "constants */"
+.BR "#include <linux/gate.h> " " /* Definition of " "struct gate_*" " */"
 .BR "#include <linux/time.h> " " /* Definition of " \
 "struct __kernel_timespec" " */"
 .BR "#include <linux/types.h>" " /* Definition of " __kernel_* " */"
 .BR "#include <sys/syscall.h>" " /* Definition of " SYS_* " constants */"
+.BR "#include <sys/types.h>  " " /* Definition of " pid_t " */"
 .B #include <unistd.h>
 .P
-.BI "long syscall(SYS_gate_wait, void *" uaddr ", __kernel_ulong_t " mask ,
-.BI "             __kernel_ulong_t " expected ", size_t " usize ,
-.BI "             const struct gate_wait_options *_Nullable " options ,
-.BI "             size_t " options_size );
-.BI "long syscall(SYS_gate_wake, pid_t " pid ", void *" uaddr ,
-.BI "             const struct gate_wake_options *_Nullable " options ,
-.BI "             size_t " options_size );
-.P
+.BI "long syscall(SYS_gate_wait, void *" uaddr ", __kernel_ulong_t " mask ","
+.BI "            __kernel_ulong_t " expected ", size_t " usize ","
+.BI "            const struct gate_wait_options *" options ","
+.BI "            size_t " options_size ");"
+.BI "long syscall(SYS_gate_wake, pid_t " pid ", void *" uaddr ","
+.BI "            const struct gate_wake_options *" options ","
+.BI "            size_t " options_size ");"
 .fi
 .P
 .IR Note :
-glibc provides no wrapper for
-.BR gate_wait ()
-or
-.BR gate_wake (),
-necessitating the use of
+There are no glibc wrappers for these system calls; they must be invoked directly using
 .BR syscall (2).
 .SH DESCRIPTION
+The
+.BR gate_wait ()
+and
+.BR gate_wake ()
+system calls provide a mechanism
+for user-space synchronization within a thread group.
+They allow a thread to wait efficiently until a specific condition is met
+on a memory location,
+potentially being woken by another thread in the same process.
+These calls offer a simpler, potentially more performant alternative to
+.BR futex (2)
+for certain use cases by providing a restricted feature set.
 .SS gate_wait()
 The
 .BR gate_wait ()
-system call provides an atomic compare-and-block primitive which can
-be used to build more general synchronization primitives.
+system call atomically checks a value in user-space memory
+and potentially puts the calling thread to sleep if
+the value matches an expected state.
 .P
-The call blocks if
-.RI "(*" uaddr " & " mask ") == " expected
-and will remain blocked until:
-.IP (a) 5
-a matching call to
-.BR gate_wake ()
-is made;
-.IP (b)
-the wait is interrupted by a signal;
-.IP (c)
-a supplied timeout expires; or
-.IP (d)
-a spurious wakeup occurs.
-.P
-The number of bytes loaded by the atomic operation is determined by
-.IR usize .
+The operation proceeds as follows:
+.IP (1) 5
+Atomically load
 .I usize
-must be a power of two no larger than
-.IR sizeof(__kernel_ulong_t) .
+bytes from the memory address
+.IR uaddr .
+The address
+.I uaddr
+must be aligned to
+.IR usize .
+.IP (2)
+Compare
+.I *uaddr & mask
+with
+.IR expected .
+.IP (3)
+If they are equal,
+the calling thread will block.
+.IP (4)
+If they are unequal,
+the system call returns immediately with the error
+.BR EAGAIN .
 .P
+If the thread blocks in step (3), it will remain asleep until one
+of the following events occurs:
+.IP (a) 5
+It is woken by a call to
+.BR gate_wake ()
+from another thread in
+the same thread group, targeting the sleeping thread's TID
+.RI ( pid )
+and the same memory address
+.RI ( uaddr ).
+.IP (b)
+The wait is interrupted by a signal handler.
+.IP (c)
+A timeout expires, if one was configured via the
 .I options
-is a pointer to a structure of the following form:
+argument.
+.IP (d)
+A spurious wakeup occurs (see CAVEATS in
+.BR gate (7)).
+.P
+The
+.I options
+argument points to a structure that allows for
+configuring aspects of the wait.
+The
+.B gate_wait_options
+structure is defined as:
 .P
 .in +4n
 .EX
 struct gate_wait_options {
-	__u64                     flags;
-	struct __kernel_timespec  timeout;
-	__s32                     clockid;
-	__u32                     reserved0;
+    __u64                     flags;
+    struct __kernel_timespec  timeout;
+    __s32                     clockid;
+    __u32                     __reserved1;
 } __attribute__((__aligned__(8)));
 .EE
 .in
 .P
-.I options_size
-should be set to
-.IR "sizeof(struct gate_wait_options)" .
-.P
-Fields added to
-.I gate_wait_options
-will retain the prior behavior when those fields are zero-filled.
-.P
-.I options_size
-smaller than
-.I "sizeof(struct gate_wait_options)"
-results in the bytes beyond
-.I options_size
-to behave as-if they were present in
-.I options
-and zero-filled.
-.P
-.I options_size
-larger than
-.I "sizeof(struct gate_wait_options)"
-is permitted so long as the additional bytes are zero-filled.
-.P
-The fields of the
-.I gate_wait_options
-structure are as follows:
+The fields are used as follows:
 .TP
 .I flags
-contains zero or more of the following constants:
+A bit mask indicating how the structure should be
+interpreted.
+At most one of the following flags can be
+set:
 .RS
 .TP
-.B GATE_WAIT_ABSTIME
+.BR GATE_WAIT_ABSTIME " (since Linux 6.14)"
+Interpret
 .I timeout
-is an absolute timeout.
+as an absolute time point
+on the clock specified by
+.IR clockid .
 .TP
-.B GATE_WAIT_RELTIME
+.BR GATE_WAIT_RELTIME " (since Linux 6.14)"
+Interpret
 .I timeout
-is a relative timeout.
+as a relative duration from
+the current time on the clock specified by
+.IR clockid .
 .RE
+.IP
+If neither flag is set,
+.I timeout
+and
+.I clockid
+are ignored, and the wait has no timeout.
 .TP
 .I timeout
-specifies the interval the wait will block.
+Specifies the expiration time.
+Ignored if no timeout flag is set in
+.IR flags .
 .TP
 .I clockid
-specifies which clock will be used to determine when
-.I timeout
-has expired.
-The clock must be either
-.BR CLOCK_REALTIME " or " CLOCK_MONOTONIC .
-.IP
-.P
+Specifies the clock reference for the timeout.
+Must be either
+.B CLOCK_MONOTONIC
+or
+.BR CLOCK_REALTIME .
+Ignored if no timeout flag is set in
+.IR flags .
+See
+.BR clock_gettime (2).
+.TP
+.I __reserved1
+Reserved for future use; ignored.
 .SS gate_wake()
 The
 .BR gate_wake ()
-system call resumes the execution of the process specified by
-.I pid
-if that process is blocked in a call to
+system call attempts to wake a specific thread
+that is currently blocked in a
 .BR gate_wait ()
-on the exact same
-.IR uaddr .
+call.
 .P
-.I options
-is a pointer to a structure of the following form:
+It targets the thread identified by
+.IR pid .
+The wakeup attempt is
+conditional: it only succeeds if the target thread
+.RI ( pid )
+is found to be currently blocked inside a
+.BR gate_wait ()
+system call,
+and that call is operating on the exact same memory address
+.I uaddr
+as provided to
+.BR gate_wake ().
+.P
+The calling thread and the target thread
+.I pid
+must belong to the same thread group.
+.P
+The
+.B gate_wake_options
+structure is defined as:
 .P
 .in +4n
 .EX
 struct gate_wake_options {
-	__u64                     flags;
+    __u64 flags;
 } __attribute__((__aligned__(8)));
 .EE
 .in
 .P
-.I options_size
-should be set to
-.I "sizeof(struct gate_wake_options)"
-when
-.I options
-is non-NULL.
-.P
-Fields added to
-.I gate_wake_options
-will retain the prior behavior when those fields are zero-filled.
-.P
-.I options_size
-smaller than
-.I "sizeof(struct gate_wake_options)"
-results in the bytes beyond
-.I options_size
-to behave as-if they were present in
-.I options
-and zero-filled.
-.P
-.I options_size
-larger than
-.I "sizeof(struct gate_wake_options)"
-is permitted so long as the additional bytes are zero-filled.
-.P
-The fields of the
-.I gate_wake_options
-structure are as follows:
+The fields are used as follows:
 .TP
-.B flags
-unused and should be set to 0.
-.IP
+.I flags
+Reserved for future use; must be zero.
+.SS options_size
+The
+.I options_size
+argument controls how
+.I options
+is interpreted:
+.IP \[bu] 3
+If
+.I options_size
+is zero, then
+.I options
+is ignored,
+and the call behaves as if all fields were present
+and set to zero.
+.IP \[bu]
+If
+.I options_size
+is nonzero,
+.I options
+must point to a valid structure, and
+.I options_size
+should specify its size.
 .P
+For forward and backward compatibility, the kernel interprets
+.I options_size
+flexibly:
+.IP \[bu] 3
+If
+.I options_size
+is smaller than the kernel's known size of a structure,
+the kernel assumes any missing bytes are zero.
+.IP \[bu]
+If
+.I options_size
+is larger than the kernel's known size of a structure,
+the caller must ensure all extra trailing bytes are zero.
+If any extra bytes are nonzero, the call fails with
+.BR E2BIG .
 .SH RETURN VALUE
-On error (and assuming it was invoked via
-.BR syscall (2)),
-\-1 is returned and
+On error, \-1 is returned, and
 .I errno
-is set to indicate the error.
+is set appropriately to
+indicate the cause of the error (see ERRORS).
 .SS gate_wait()
-Returns 0 when successfully woken up by a call to
+On success, 0 is returned.
+This indicates the thread met the initial
+wait condition
+.IR "*uaddr & mask == expected" ,
+entered a wait state,
+and was subsequently woken up.
+The wakeup could be initiated by
+a call to
 .BR gate_wake ()
-or if it was woken up spuriously.
+or occur spuriously.
 .SS gate_wake()
-Returns 1 if it definitively woke up the process.
-Returns 0 if the process was probably not blocked in any call to
-.BR gate_wait ().
+On success,
+.BR gate_wake ()
+returns one of the following non-negative values:
+.TP 5
+.B 1
+The target thread
+.I pid
+was found, was blocked in
+.BR gate_wait ()
+on the specific address
+.IR uaddr ,
+and was
+successfully woken up.
+.TP 5
+.B 0
+The target thread
+.I pid
+was found, but it was
+.B not
+currently blocked in a
+.BR gate_wait ()
+call (on any address)
+at the moment
+.BR gate_wake ()
+performed its check.
 .SH ERRORS
-.SS gate_wait()
+Both system calls can fail with the following errors:
 .TP
 .B E2BIG
+The specified
 .I options_size
-exceeds a page of memory.
+is larger than the structure
+size known to the kernel, and the extra trailing bytes
+provided by the caller contain nonzero values.
 .TP
 .B E2BIG
+The specified
 .I options_size
-implies that there are fields it does not understand which are set to non-zero
-values.
+exceeds a system limit.
+.TP
+.B EFAULT
+.I options
+points to an invalid memory
+address.
+.TP
+.B EINVAL
+The
+.I flags
+field in the respective
+.I options
+structure contained invalid or reserved bits set to 1.
+.P
+The
+.BR gate_wait ()
+system call can also fail with the following errors:
 .TP
 .B EAGAIN
-.RI "(*" uaddr " & " mask ") != " expected .
+The condition
+.I *uaddr & mask == expected
+was false when checked atomically.
+The thread did not block.
 .TP
 .B EFAULT
 .I uaddr
-referenced invalid memory.
-.TP
-.B EFAULT
-.I options
-referenced invalid memory.
+points to invalid memory.
 .TP
 .B EINTR
-A signal occurred while blocked.
+The wait was interrupted by a signal (see
+.BR signal (7)).
 .TP
 .B EINVAL
 .I uaddr
-was insufficiently aligned.
+was not aligned to
+.IR usize .
 .TP
 .B EINVAL
-.I options.flags
-was invalid.
-.TP
-.B EINVAL
-.I options.timeout.tv_sec
-is negative or if
-.I options.timeout.tv_nsec
-is outside the range [0, 999,999,999].
+.I usize
+was 0, not a power of two, or larger than
+.IR sizeof(__kernel_ulong_t) .
 .TP
 .B EINVAL
 .I options.clockid
-did not refer to neither
-.BR CLOCK_REALTIME " nor " CLOCK_MONOTONIC .
-.TP
-.B ETIMEDOUT
-.I options.timeout
-expired while blocked.
-.SS gate_wake()
-.TP
-.B E2BIG
-.I options_size
-exceeds a page of memory.
-.TP
-.B E2BIG
-.I options_size
-implies that there are fields it does not understand which are set to non-zero
-values.
-.TP
-.B EAGAIN
-.I pid
-was blocked in
-.BR gate_wait ()
-but
-.I uaddr
-did not match.
-.TP
-.B EFAULT
-.I options
-referenced invalid memory.
+was not
+.B CLOCK_MONOTONIC
+or
+.BR CLOCK_REALTIME .
 .TP
 .B EINVAL
-.I options.flags
-was invalid.
+.I options.timeout.tv_sec
+was negative, or
+.I options.timeout.tv_nsec
+was outside the range [0,
+999,999,999].
+.TP
+.B ETIMEDOUT
+The wait timed out before being woken
+up or interrupted by a signal.
+.P
+The
+.BR gate_wake ()
+system call can also fail with the following errors:
+.TP
+.B EAGAIN
+The target thread
+.I pid
+was found and was blocked in
+.BR gate_wait (),
+but not on the specified address
+.IR uaddr .
 .TP
 .B EPERM
+The calling thread and the target thread
 .I pid
-was not in the same thread group as the caller.
+do not belong to the same thread group.
 .TP
 .B ESRCH
+No thread with the ID
 .I pid
-did not identify an existing process.
+exists (or it terminated).
 .SH VERSIONS
-These system call first appeared in Linux 6.14.
+These system calls first appeared in Linux 6.14.
 .SH STANDARDS
-This system call is Linux-specific.
-.SH NOTES
-Unlike
-.BR futex (2),
-.BR gate_wait ()
-and
-.BR gate_wake ()
-offer a more restricted interface that trades off certain features for
-performance.
-.P
-Both sides of the synchronization (i.e. the processes using
-.BR gate_wait ()
-and
-.BR gate_wake ())
-must belong to the same thread group.
-.SS Memory barriers
-The
-.BR gate_wait ()
-call performs an
-.IR smp_mb ()
-before dereferencing
-.IR uaddr ;
-no barrier is enforced after the load.
-.P
-The
-.BR gate_wake ()
-call performs an
-.IR smp_mb ()
-before checking for a waiting process to wake;
-no barrier is enforced after the load.
+These system calls are Linux-specific.
 .SH EXAMPLES
 The program below demonstrates the use of gates in a scenario where a parent
 process and a child process synchronize access to the terminal using a pair of
@@ -501,7 +572,10 @@ main(int argc, char *argv[])
 .EE
 .\" SRC END
 .SH SEE ALSO
-.BR futex (2)
+.BR futex (2),
+.BR gate (7),
+.BR signal (7),
+.BR syscall (2),
+.BR time (7)
 .P
 .I Documentation/memory\-barriers.txt
-in the Linux kernel source tree
